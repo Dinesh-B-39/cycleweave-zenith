@@ -1,56 +1,131 @@
-import { useState } from 'react';
+import { useState, useCallback } from 'react';
 import { MainLayout } from '@/components/layout/MainLayout';
 import { useLCA } from '@/context/LCAContext';
 import { useNavigate } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { ScanResult } from '@/types/lca';
-import { Camera, Upload, Loader2, CheckCircle, ArrowRight, Sparkles } from 'lucide-react';
+import { Camera, Upload, Loader2, CheckCircle, ArrowRight, Sparkles, Wifi, WifiOff } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useToast } from '@/hooks/use-toast';
+import { useAnalyzeScan, useUploadAndAnalyze, useApplyScanToLCA } from '@/hooks/use-scanner-api';
 
 export default function Scanner() {
-  const { setLastScanResult, updateLCAData } = useLCA();
+  const { setLastScanResult, updateLCAData, isBackendConnected, lcaId, createNewLCA } = useLCA();
   const navigate = useNavigate();
   const { toast } = useToast();
   const [isScanning, setIsScanning] = useState(false);
   const [scanResult, setScanResult] = useState<ScanResult | null>(null);
+  const [scanId, setScanId] = useState<string | null>(null);
   const [dragOver, setDragOver] = useState(false);
 
-  const mockScan = async () => {
+  const analyzeMutation = useAnalyzeScan();
+  const uploadMutation = useUploadAndAnalyze();
+  const applyScanMutation = useApplyScanToLCA();
+
+  const runScan = useCallback(async (file?: File) => {
     setIsScanning(true);
     
-    // Simulate API call delay
-    await new Promise(resolve => setTimeout(resolve, 2500));
-    
-    const result: ScanResult = {
-      scrapType: 'Aluminum UBC (Used Beverage Cans)',
-      purity: 94.2,
-      estimatedWeight: 1250,
-      co2Saved: 892,
-      revenueEstimate: 2340,
-      recommendedProcess: 'Electric Arc Furnace',
-    };
-    
-    setScanResult(result);
-    setIsScanning(false);
-  };
+    try {
+      let result;
+      
+      if (isBackendConnected) {
+        // Use backend API
+        if (file) {
+          result = await uploadMutation.mutateAsync(file);
+        } else {
+          result = await analyzeMutation.mutateAsync(undefined);
+        }
+        
+        setScanResult({
+          scrapType: result.scrapType,
+          purity: result.purity,
+          estimatedWeight: result.estimatedWeight,
+          co2Saved: result.co2Saved,
+          revenueEstimate: result.revenueEstimate,
+          recommendedProcess: result.recommendedProcess,
+        });
+        setScanId(result._id);
+      } else {
+        // Fallback to mock data
+        await new Promise(resolve => setTimeout(resolve, 2500));
+        
+        const mockResult: ScanResult = {
+          scrapType: 'Aluminum UBC (Used Beverage Cans)',
+          purity: 94.2,
+          estimatedWeight: 1250,
+          co2Saved: 892,
+          revenueEstimate: 2340,
+          recommendedProcess: 'Electric Arc Furnace',
+        };
+        
+        setScanResult(mockResult);
+        setScanId(null);
+      }
+    } catch (error) {
+      toast({
+        title: 'Scan Failed',
+        description: (error as Error).message || 'Failed to analyze scrap material.',
+        variant: 'destructive',
+      });
+    } finally {
+      setIsScanning(false);
+    }
+  }, [isBackendConnected, analyzeMutation, uploadMutation, toast]);
 
-  const applyToLCA = () => {
+  const handleFileDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    setDragOver(false);
+    
+    const file = e.dataTransfer.files[0];
+    if (file && file.type.startsWith('image/')) {
+      runScan(file);
+    }
+  }, [runScan]);
+
+  const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      runScan(file);
+    }
+  }, [runScan]);
+
+  const applyToLCA = async () => {
     if (!scanResult) return;
     
-    setLastScanResult(scanResult);
-    updateLCAData({
-      scrapInputRate: Math.round(scanResult.purity),
-      recyclingEfficiency: Math.min(95, Math.round(scanResult.purity * 0.95)),
-      furnaceType: 'Electric Arc',
-    });
-    
-    toast({
-      title: 'Scan Applied',
-      description: 'Circularity parameters updated with scan data.',
-    });
-    
-    navigate('/');
+    try {
+      if (isBackendConnected && scanId) {
+        // Ensure we have an LCA ID
+        let currentLcaId = lcaId;
+        if (!currentLcaId) {
+          currentLcaId = await createNewLCA();
+        }
+        
+        if (currentLcaId) {
+          await applyScanMutation.mutateAsync({ scanId, lcaId: currentLcaId });
+        }
+      }
+      
+      // Update local state
+      setLastScanResult(scanResult, scanId);
+      updateLCAData({
+        scrapInputRate: Math.round(scanResult.purity),
+        recyclingEfficiency: Math.min(95, Math.round(scanResult.purity * 0.95)),
+        furnaceType: 'Electric Arc',
+      });
+      
+      toast({
+        title: 'Scan Applied',
+        description: 'Circularity parameters updated with scan data.',
+      });
+      
+      navigate('/');
+    } catch (error) {
+      toast({
+        title: 'Failed to Apply',
+        description: (error as Error).message || 'Failed to apply scan to LCA.',
+        variant: 'destructive',
+      });
+    }
   };
 
   return (
@@ -64,8 +139,17 @@ export default function Scanner() {
                 <Sparkles className="w-6 h-6 text-secondary" />
                 Scan Scrap
               </h1>
-              <p className="text-sm text-muted-foreground">
+              <p className="text-sm text-muted-foreground flex items-center gap-2">
                 AI-powered scrap material analysis and classification
+                {isBackendConnected ? (
+                  <span className="inline-flex items-center gap-1 text-xs text-secondary">
+                    <Wifi className="w-3 h-3" /> API Connected
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+                    <WifiOff className="w-3 h-3" /> Offline Mode
+                  </span>
+                )}
               </p>
             </div>
             <Button variant="ghost" onClick={() => navigate('/')}>
@@ -120,16 +204,21 @@ export default function Scanner() {
               </div>
 
               {/* Upload Area */}
-              <div
+              <label
                 onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
                 onDragLeave={() => setDragOver(false)}
-                onDrop={(e) => { e.preventDefault(); setDragOver(false); mockScan(); }}
+                onDrop={handleFileDrop}
                 className={cn(
-                  'glass-card p-8 border-2 border-dashed transition-all cursor-pointer',
+                  'glass-card p-8 border-2 border-dashed transition-all cursor-pointer block',
                   dragOver ? 'border-primary bg-primary/5' : 'border-border hover:border-muted-foreground'
                 )}
-                onClick={mockScan}
               >
+                <input
+                  type="file"
+                  accept="image/*"
+                  className="hidden"
+                  onChange={handleFileSelect}
+                />
                 <div className="text-center">
                   <Upload className={cn(
                     'w-10 h-10 mx-auto mb-3',
@@ -142,12 +231,12 @@ export default function Scanner() {
                     Supports JPG, PNG, HEIC up to 10MB
                   </p>
                 </div>
-              </div>
+              </label>
 
               <Button 
                 className="w-full gap-2"
                 size="lg"
-                onClick={mockScan}
+                onClick={() => runScan()}
                 disabled={isScanning}
               >
                 {isScanning ? (
@@ -212,8 +301,13 @@ export default function Scanner() {
                     className="w-full gap-2 neon-border-teal"
                     size="lg"
                     onClick={applyToLCA}
+                    disabled={applyScanMutation.isPending}
                   >
-                    <ArrowRight className="w-5 h-5" />
+                    {applyScanMutation.isPending ? (
+                      <Loader2 className="w-5 h-5 animate-spin" />
+                    ) : (
+                      <ArrowRight className="w-5 h-5" />
+                    )}
                     Use in LCA
                   </Button>
                 </>

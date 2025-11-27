@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useCallback } from 'react';
 import { MainLayout } from '@/components/layout/MainLayout';
 import { useLCA } from '@/context/LCAContext';
 import { useNavigate } from 'react-router-dom';
@@ -14,10 +14,13 @@ import {
   Zap,
   Truck,
   Settings,
-  Recycle
+  Recycle,
+  Wifi,
+  WifiOff
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useToast } from '@/hooks/use-toast';
+import { useRunDoctorAnalysis, useApplyImprovement } from '@/hooks/use-doctor-api';
 
 const categoryIcons = {
   energy: Zap,
@@ -27,97 +30,149 @@ const categoryIcons = {
 };
 
 export default function Doctor() {
-  const { lcaData, applySimulation, setDoctorAnalysis } = useLCA();
+  const { lcaData, applySimulation, setDoctorAnalysis, isBackendConnected, lcaId, createNewLCA } = useLCA();
   const navigate = useNavigate();
   const { toast } = useToast();
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysis, setAnalysis] = useState<DoctorAnalysis | null>(null);
+  const [analysisId, setAnalysisId] = useState<string | null>(null);
   const [simulatedImprovement, setSimulatedImprovement] = useState<string | null>(null);
 
-  const runAnalysis = async () => {
+  const runAnalysisMutation = useRunDoctorAnalysis();
+  const applyImprovementMutation = useApplyImprovement();
+
+  const runAnalysis = useCallback(async () => {
     setIsAnalyzing(true);
     
-    // Simulate API call
-    await new Promise(resolve => setTimeout(resolve, 3000));
-    
-    const mockAnalysis: DoctorAnalysis = {
-      overallScore: 72,
-      carbonIntensity: {
-        value: lcaData.co2Emission / 1000,
-        benchmark: 1.8,
-        isGap: lcaData.co2Emission / 1000 > 1.8,
-      },
-      energyEfficiency: {
-        value: 78,
-        benchmark: 85,
-        isGap: true,
-      },
-      circularityRating: lcaData.circularityScore >= 70 ? 'Good' : 'Needs Improvement',
-      improvements: [
-        {
-          id: '1',
-          title: 'Increase Solar in Grid Mix',
-          description: 'Shifting 15% of coal to solar would reduce carbon intensity by 12%.',
-          potentialGain: 12,
-          category: 'energy',
-          simulateAction: {
-            gridMix: { ...lcaData.gridMix, coal: lcaData.gridMix.coal - 15, solar: lcaData.gridMix.solar + 15 }
-          }
-        },
-        {
-          id: '2',
-          title: 'Switch to Rail Transport',
-          description: 'Rail transport for inbound logistics would cut transport emissions by 60%.',
-          potentialGain: 8,
-          category: 'transport',
-          simulateAction: { transportMode: 'Rail', vehicleEfficiency: 0.04 }
-        },
-        {
-          id: '3',
-          title: 'Optimize Furnace Temperature',
-          description: 'Reducing operating temperature by 100°C maintains quality while saving energy.',
-          potentialGain: 5,
-          category: 'process',
-          simulateAction: { temperature: lcaData.temperature - 100 }
-        },
-        {
-          id: '4',
-          title: 'Increase Scrap Input Rate',
-          description: 'Boosting recycled content to 65% significantly improves circularity score.',
-          potentialGain: 15,
-          category: 'circularity',
-          simulateAction: { scrapInputRate: 65 }
-        },
-        {
-          id: '5',
-          title: 'Implement Closed-Loop Recovery',
-          description: 'Establishing closed-loop partnerships could achieve 80% material return rate.',
-          potentialGain: 10,
-          category: 'circularity',
-          simulateAction: { closedLoopRate: 80 }
-        },
-      ],
-      riskFactors: [
-        'High coal dependency in energy mix',
-        'Road transport contributes 23% of total emissions',
-        'Below industry benchmark for recycled content',
-      ],
-    };
-    
-    setAnalysis(mockAnalysis);
-    setDoctorAnalysis(mockAnalysis);
-    setIsAnalyzing(false);
-  };
+    try {
+      if (isBackendConnected) {
+        // Ensure we have an LCA ID
+        let currentLcaId = lcaId;
+        if (!currentLcaId) {
+          currentLcaId = await createNewLCA();
+        }
+        
+        if (currentLcaId) {
+          const result = await runAnalysisMutation.mutateAsync(currentLcaId);
+          
+          setAnalysis({
+            overallScore: result.overallScore,
+            carbonIntensity: result.carbonIntensity,
+            energyEfficiency: result.energyEfficiency,
+            circularityRating: result.circularityRating,
+            improvements: result.improvements,
+            riskFactors: result.riskFactors,
+          });
+          setAnalysisId(result._id);
+          setDoctorAnalysis(result, result._id);
+        }
+      } else {
+        // Fallback to mock data
+        await new Promise(resolve => setTimeout(resolve, 3000));
+        
+        const mockAnalysis: DoctorAnalysis = {
+          overallScore: 72,
+          carbonIntensity: {
+            value: lcaData.co2Emission / 1000,
+            benchmark: 1.8,
+            isGap: lcaData.co2Emission / 1000 > 1.8,
+          },
+          energyEfficiency: {
+            value: 78,
+            benchmark: 85,
+            isGap: true,
+          },
+          circularityRating: lcaData.circularityScore >= 70 ? 'Good' : 'Needs Improvement',
+          improvements: [
+            {
+              id: '1',
+              title: 'Increase Solar in Grid Mix',
+              description: 'Shifting 15% of coal to solar would reduce carbon intensity by 12%.',
+              potentialGain: 12,
+              category: 'energy',
+              simulateAction: {
+                gridMix: { ...lcaData.gridMix, coal: lcaData.gridMix.coal - 15, solar: lcaData.gridMix.solar + 15 }
+              }
+            },
+            {
+              id: '2',
+              title: 'Switch to Rail Transport',
+              description: 'Rail transport for inbound logistics would cut transport emissions by 60%.',
+              potentialGain: 8,
+              category: 'transport',
+              simulateAction: { transportMode: 'Rail', vehicleEfficiency: 0.04 }
+            },
+            {
+              id: '3',
+              title: 'Optimize Furnace Temperature',
+              description: 'Reducing operating temperature by 100°C maintains quality while saving energy.',
+              potentialGain: 5,
+              category: 'process',
+              simulateAction: { temperature: lcaData.temperature - 100 }
+            },
+            {
+              id: '4',
+              title: 'Increase Scrap Input Rate',
+              description: 'Boosting recycled content to 65% significantly improves circularity score.',
+              potentialGain: 15,
+              category: 'circularity',
+              simulateAction: { scrapInputRate: 65 }
+            },
+            {
+              id: '5',
+              title: 'Implement Closed-Loop Recovery',
+              description: 'Establishing closed-loop partnerships could achieve 80% material return rate.',
+              potentialGain: 10,
+              category: 'circularity',
+              simulateAction: { closedLoopRate: 80 }
+            },
+          ],
+          riskFactors: [
+            'High coal dependency in energy mix',
+            'Road transport contributes 23% of total emissions',
+            'Below industry benchmark for recycled content',
+          ],
+        };
+        
+        setAnalysis(mockAnalysis);
+        setDoctorAnalysis(mockAnalysis, null);
+        setAnalysisId(null);
+      }
+    } catch (error) {
+      toast({
+        title: 'Analysis Failed',
+        description: (error as Error).message || 'Failed to run AI Doctor analysis.',
+        variant: 'destructive',
+      });
+    } finally {
+      setIsAnalyzing(false);
+    }
+  }, [isBackendConnected, lcaId, createNewLCA, runAnalysisMutation, lcaData, setDoctorAnalysis, toast]);
 
-  const simulateImprovement = (improvement: DoctorImprovement) => {
-    setSimulatedImprovement(improvement.id);
-    applySimulation(improvement.simulateAction);
-    
-    toast({
-      title: 'Simulation Applied',
-      description: `Preview showing potential ${improvement.potentialGain}% improvement.`,
-    });
-  };
+  const simulateImprovement = useCallback(async (improvement: DoctorImprovement) => {
+    try {
+      if (isBackendConnected && analysisId) {
+        await applyImprovementMutation.mutateAsync({
+          analysisId,
+          improvementId: improvement.id,
+        });
+      }
+      
+      setSimulatedImprovement(improvement.id);
+      applySimulation(improvement.simulateAction);
+      
+      toast({
+        title: 'Simulation Applied',
+        description: `Preview showing potential ${improvement.potentialGain}% improvement.`,
+      });
+    } catch (error) {
+      toast({
+        title: 'Simulation Failed',
+        description: (error as Error).message || 'Failed to apply improvement.',
+        variant: 'destructive',
+      });
+    }
+  }, [isBackendConnected, analysisId, applyImprovementMutation, applySimulation, toast]);
 
   return (
     <MainLayout>
@@ -130,8 +185,17 @@ export default function Doctor() {
                 <Stethoscope className="w-6 h-6 text-primary" />
                 AI Doctor
               </h1>
-              <p className="text-sm text-muted-foreground">
+              <p className="text-sm text-muted-foreground flex items-center gap-2">
                 Intelligent analysis and optimization recommendations
+                {isBackendConnected ? (
+                  <span className="inline-flex items-center gap-1 text-xs text-secondary">
+                    <Wifi className="w-3 h-3" /> API Connected
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+                    <WifiOff className="w-3 h-3" /> Offline Mode
+                  </span>
+                )}
               </p>
             </div>
             <div className="flex gap-3">
@@ -296,7 +360,7 @@ export default function Doctor() {
                                 size="sm"
                                 variant={isSimulated ? 'default' : 'outline'}
                                 onClick={() => simulateImprovement(improvement)}
-                                disabled={isSimulated}
+                                disabled={isSimulated || applyImprovementMutation.isPending}
                                 className="gap-1"
                               >
                                 {isSimulated ? (
@@ -304,6 +368,8 @@ export default function Doctor() {
                                     <CheckCircle className="w-4 h-4" />
                                     Applied
                                   </>
+                                ) : applyImprovementMutation.isPending ? (
+                                  <Loader2 className="w-4 h-4 animate-spin" />
                                 ) : (
                                   <>
                                     <Play className="w-4 h-4" />
