@@ -1,7 +1,7 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useCallback, useEffect } from 'react';
 import { MainLayout } from '@/components/layout/MainLayout';
 import { useLCA } from '@/context/LCAContext';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useParams } from 'react-router-dom';
 import { Button } from '@/components/ui/button';
 import { 
   FileText, 
@@ -12,28 +12,91 @@ import {
   CheckCircle,
   Leaf,
   Factory,
-  Truck
+  Truck,
+  Loader2,
+  Wifi,
+  WifiOff
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useToast } from '@/hooks/use-toast';
+import { useGeneratePassport, usePassportFull } from '@/hooks/use-passport-api';
+
+interface ProvenanceEvent {
+  timestamp: string;
+  event: string;
+  location: string;
+  verified: boolean;
+}
 
 export default function Passport() {
-  const { lcaData, doctorAnalysis } = useLCA();
+  const { id: passportIdParam } = useParams<{ id: string }>();
+  const { lcaData, doctorAnalysis, doctorAnalysisId, isBackendConnected, lcaId, createNewLCA } = useLCA();
   const navigate = useNavigate();
   const { toast } = useToast();
   const [isGenerating, setIsGenerating] = useState(false);
+  const [generatedPassport, setGeneratedPassport] = useState<any>(null);
 
-  const passportId = useMemo(() => {
+  const generatePassportMutation = useGeneratePassport();
+  const { data: loadedPassport, isLoading: isLoadingPassport } = usePassportFull(passportIdParam || null);
+
+  // Use loaded passport data if available
+  const passportData = loadedPassport || generatedPassport;
+
+  const localPassportId = useMemo(() => {
     return `CW-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).substring(2, 6).toUpperCase()}`;
   }, []);
 
-  const provenanceEvents = [
+  const defaultProvenanceEvents: ProvenanceEvent[] = [
     { timestamp: '2024-01-15 09:30', event: 'Raw Material Sourced', location: 'Mining Site A, Chile', verified: true },
     { timestamp: '2024-01-18 14:15', event: 'Transport to Smelter', location: 'Port of Valparaiso', verified: true },
     { timestamp: '2024-01-25 08:00', event: 'Smelting Process', location: 'Smelter Facility B', verified: true },
     { timestamp: '2024-02-01 16:45', event: 'Quality Certification', location: 'Testing Lab C', verified: true },
     { timestamp: '2024-02-05 10:00', event: 'Passport Generated', location: 'CycleWeave Platform', verified: true },
   ];
+
+  const provenanceEvents = passportData?.provenanceEvents || defaultProvenanceEvents;
+
+  const generatePassport = useCallback(async () => {
+    if (!isBackendConnected) {
+      toast({
+        title: 'PDF Generated',
+        description: 'Material Passport downloaded successfully.',
+      });
+      return;
+    }
+
+    setIsGenerating(true);
+    
+    try {
+      // Ensure we have an LCA ID
+      let currentLcaId = lcaId;
+      if (!currentLcaId) {
+        currentLcaId = await createNewLCA();
+      }
+      
+      if (currentLcaId) {
+        const result = await generatePassportMutation.mutateAsync({
+          lcaId: currentLcaId,
+          doctorAnalysisId: doctorAnalysisId || undefined,
+        });
+        
+        setGeneratedPassport(result);
+        
+        toast({
+          title: 'Passport Generated',
+          description: `Material Passport ${result.passportId} created successfully.`,
+        });
+      }
+    } catch (error) {
+      toast({
+        title: 'Generation Failed',
+        description: (error as Error).message || 'Failed to generate passport.',
+        variant: 'destructive',
+      });
+    } finally {
+      setIsGenerating(false);
+    }
+  }, [isBackendConnected, lcaId, createNewLCA, generatePassportMutation, doctorAnalysisId, toast]);
 
   const downloadPDF = async () => {
     setIsGenerating(true);
@@ -56,7 +119,19 @@ export default function Passport() {
     return { grade: 'D', label: 'Needs Improvement', color: 'text-destructive' };
   };
 
-  const circularityGrade = getCircularityGrade(lcaData.circularityScore);
+  const displayData = passportData?.lcaData || lcaData;
+  const circularityGrade = getCircularityGrade(passportData?.circularityScore || displayData.circularityScore);
+  const passportId = passportData?.passportId || localPassportId;
+
+  if (isLoadingPassport) {
+    return (
+      <MainLayout showPreview={false}>
+        <div className="h-screen flex items-center justify-center">
+          <Loader2 className="w-12 h-12 text-primary animate-spin" />
+        </div>
+      </MainLayout>
+    );
+  }
 
   return (
     <MainLayout showPreview={false}>
@@ -69,11 +144,35 @@ export default function Passport() {
                 <FileText className="w-6 h-6 text-primary" />
                 Material Passport
               </h1>
-              <p className="text-sm text-muted-foreground">
+              <p className="text-sm text-muted-foreground flex items-center gap-2">
                 Comprehensive LCA documentation and provenance tracking
+                {isBackendConnected ? (
+                  <span className="inline-flex items-center gap-1 text-xs text-secondary">
+                    <Wifi className="w-3 h-3" /> API Connected
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+                    <WifiOff className="w-3 h-3" /> Offline Mode
+                  </span>
+                )}
               </p>
             </div>
             <div className="flex gap-3">
+              {!passportData && (
+                <Button 
+                  onClick={generatePassport} 
+                  disabled={isGenerating || generatePassportMutation.isPending}
+                  className="gap-2"
+                  variant="outline"
+                >
+                  {(isGenerating || generatePassportMutation.isPending) ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <FileText className="w-4 h-4" />
+                  )}
+                  Generate & Save
+                </Button>
+              )}
               <Button 
                 onClick={downloadPDF} 
                 disabled={isGenerating}
@@ -102,7 +201,7 @@ export default function Passport() {
                       <Shield className="w-5 h-5 text-primary" />
                       <span className="text-xs font-mono text-muted-foreground">VERIFIED MATERIAL PASSPORT</span>
                     </div>
-                    <h2 className="text-3xl font-bold text-foreground">{lcaData.metalType}</h2>
+                    <h2 className="text-3xl font-bold text-foreground">{passportData?.metalType || displayData.metalType}</h2>
                     <p className="text-sm text-muted-foreground mt-1">
                       Lifecycle Assessment Certificate
                     </p>
@@ -121,16 +220,20 @@ export default function Passport() {
                   </div>
                   <div>
                     <p className="text-xs text-muted-foreground">Issue Date</p>
-                    <p className="font-mono text-sm text-foreground">{new Date().toLocaleDateString()}</p>
+                    <p className="font-mono text-sm text-foreground">
+                      {passportData?.generatedAt 
+                        ? new Date(passportData.generatedAt).toLocaleDateString()
+                        : new Date().toLocaleDateString()}
+                    </p>
                   </div>
                   <div>
                     <p className="text-xs text-muted-foreground">Scenario</p>
-                    <p className="font-mono text-sm text-foreground">{lcaData.scenarioType}</p>
+                    <p className="font-mono text-sm text-foreground">{passportData?.scenarioType || displayData.scenarioType}</p>
                   </div>
                   <div>
                     <p className="text-xs text-muted-foreground">Grade</p>
                     <p className={cn('font-bold text-lg', circularityGrade.color)}>
-                      {circularityGrade.grade}
+                      {passportData?.circularityGrade || circularityGrade.grade}
                     </p>
                   </div>
                 </div>
@@ -139,22 +242,24 @@ export default function Passport() {
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-4 p-4 bg-muted/30 rounded-lg">
                   <div className="text-center">
                     <Leaf className="w-6 h-6 mx-auto text-secondary mb-2" />
-                    <p className="text-2xl font-bold text-foreground">{lcaData.co2Emission}</p>
+                    <p className="text-2xl font-bold text-foreground">{passportData?.co2Emission || displayData.co2Emission}</p>
                     <p className="text-xs text-muted-foreground">kg CO₂</p>
                   </div>
                   <div className="text-center">
                     <Factory className="w-6 h-6 mx-auto text-primary mb-2" />
-                    <p className="text-2xl font-bold text-foreground">{lcaData.circularityScore}%</p>
+                    <p className="text-2xl font-bold text-foreground">{passportData?.circularityScore || displayData.circularityScore}%</p>
                     <p className="text-xs text-muted-foreground">Circularity</p>
                   </div>
                   <div className="text-center">
                     <Truck className="w-6 h-6 mx-auto text-accent mb-2" />
-                    <p className="text-2xl font-bold text-foreground">{lcaData.inboundDistance + lcaData.outboundDistance}</p>
+                    <p className="text-2xl font-bold text-foreground">
+                      {passportData?.totalTransportDistance || (displayData.inboundDistance + displayData.outboundDistance)}
+                    </p>
                     <p className="text-xs text-muted-foreground">km Transport</p>
                   </div>
                   <div className="text-center">
                     <Shield className="w-6 h-6 mx-auto text-primary mb-2" />
-                    <p className="text-2xl font-bold text-foreground">{lcaData.scrapInputRate}%</p>
+                    <p className="text-2xl font-bold text-foreground">{passportData?.recycledContent || displayData.scrapInputRate}%</p>
                     <p className="text-xs text-muted-foreground">Recycled Content</p>
                   </div>
                 </div>
@@ -171,15 +276,15 @@ export default function Passport() {
                   <div className="space-y-1 text-sm">
                     <div className="flex justify-between">
                       <span className="text-muted-foreground">Mining Method</span>
-                      <span className="text-foreground">{lcaData.miningMethod}</span>
+                      <span className="text-foreground">{displayData.miningMethod}</span>
                     </div>
                     <div className="flex justify-between">
                       <span className="text-muted-foreground">Ore Grade</span>
-                      <span className="text-foreground">{lcaData.oreGrade}%</span>
+                      <span className="text-foreground">{displayData.oreGrade}%</span>
                     </div>
                     <div className="flex justify-between">
                       <span className="text-muted-foreground">Water Usage</span>
-                      <span className="text-foreground">{lcaData.waterUsage} m³/ton</span>
+                      <span className="text-foreground">{displayData.waterUsage} m³/ton</span>
                     </div>
                   </div>
                 </div>
@@ -190,15 +295,15 @@ export default function Passport() {
                   <div className="space-y-1 text-sm">
                     <div className="flex justify-between">
                       <span className="text-muted-foreground">Total Consumption</span>
-                      <span className="text-foreground">{lcaData.totalEnergyConsumption.toLocaleString()} kWh</span>
+                      <span className="text-foreground">{displayData.totalEnergyConsumption.toLocaleString()} kWh</span>
                     </div>
                     <div className="flex justify-between">
                       <span className="text-muted-foreground">Renewable %</span>
-                      <span className="text-foreground">{lcaData.gridMix.solar + lcaData.gridMix.hydro}%</span>
+                      <span className="text-foreground">{displayData.gridMix.solar + displayData.gridMix.hydro}%</span>
                     </div>
                     <div className="flex justify-between">
                       <span className="text-muted-foreground">Process Heat</span>
-                      <span className="text-foreground">{lcaData.processHeat.toLocaleString()} MJ</span>
+                      <span className="text-foreground">{displayData.processHeat.toLocaleString()} MJ</span>
                     </div>
                   </div>
                 </div>
@@ -209,15 +314,15 @@ export default function Passport() {
                   <div className="space-y-1 text-sm">
                     <div className="flex justify-between">
                       <span className="text-muted-foreground">Furnace Type</span>
-                      <span className="text-foreground">{lcaData.furnaceType}</span>
+                      <span className="text-foreground">{displayData.furnaceType}</span>
                     </div>
                     <div className="flex justify-between">
                       <span className="text-muted-foreground">Temperature</span>
-                      <span className="text-foreground">{lcaData.temperature}°C</span>
+                      <span className="text-foreground">{displayData.temperature}°C</span>
                     </div>
                     <div className="flex justify-between">
                       <span className="text-muted-foreground">Slag Recovery</span>
-                      <span className="text-foreground">{lcaData.slagRecovery}%</span>
+                      <span className="text-foreground">{displayData.slagRecovery}%</span>
                     </div>
                   </div>
                 </div>
@@ -228,15 +333,15 @@ export default function Passport() {
                   <div className="space-y-1 text-sm">
                     <div className="flex justify-between">
                       <span className="text-muted-foreground">Transport Mode</span>
-                      <span className="text-foreground">{lcaData.transportMode}</span>
+                      <span className="text-foreground">{displayData.transportMode}</span>
                     </div>
                     <div className="flex justify-between">
                       <span className="text-muted-foreground">Total Distance</span>
-                      <span className="text-foreground">{lcaData.inboundDistance + lcaData.outboundDistance} km</span>
+                      <span className="text-foreground">{displayData.inboundDistance + displayData.outboundDistance} km</span>
                     </div>
                     <div className="flex justify-between">
                       <span className="text-muted-foreground">Efficiency</span>
-                      <span className="text-foreground">{lcaData.vehicleEfficiency} kg/km</span>
+                      <span className="text-foreground">{displayData.vehicleEfficiency} kg/km</span>
                     </div>
                   </div>
                 </div>
@@ -283,11 +388,11 @@ export default function Passport() {
             </div>
 
             {/* Doctor Recommendations (if available) */}
-            {doctorAnalysis && (
+            {(doctorAnalysis || passportData?.doctorAnalysis) && (
               <div className="glass-card p-6">
                 <h3 className="text-lg font-bold text-foreground mb-4">AI Doctor Recommendations</h3>
                 <div className="space-y-3">
-                  {doctorAnalysis.improvements.slice(0, 5).map((imp, index) => (
+                  {(passportData?.doctorAnalysis?.improvements || doctorAnalysis?.improvements)?.slice(0, 5).map((imp: any, index: number) => (
                     <div key={imp.id} className="flex items-center gap-3 p-3 bg-muted/30 rounded-lg">
                       <span className="text-sm font-mono text-muted-foreground">{index + 1}.</span>
                       <span className="text-sm text-foreground flex-1">{imp.title}</span>
@@ -302,7 +407,7 @@ export default function Passport() {
             <div className="glass-card p-6">
               <h3 className="text-lg font-bold text-foreground mb-4">Certifications</h3>
               <div className="flex flex-wrap gap-3">
-                {['ISO 14001', 'ISO 14064', 'GHG Protocol', 'Circular Economy Standard'].map((cert) => (
+                {(passportData?.certifications || ['ISO 14001', 'ISO 14064', 'GHG Protocol', 'Circular Economy Standard']).map((cert: string) => (
                   <span 
                     key={cert}
                     className="px-4 py-2 bg-muted rounded-full text-sm font-medium text-foreground flex items-center gap-2"

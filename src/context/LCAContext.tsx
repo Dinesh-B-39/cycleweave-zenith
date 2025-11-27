@@ -1,5 +1,6 @@
-import React, { createContext, useContext, useState, useCallback, useMemo } from 'react';
+import React, { createContext, useContext, useState, useCallback, useMemo, useEffect } from 'react';
 import { LCAData, ScanResult, DoctorAnalysis } from '@/types/lca';
+import { lcaApi } from '@/lib/api';
 
 const defaultLCAData: LCAData = {
   metalType: 'Aluminium',
@@ -33,23 +34,48 @@ const defaultLCAData: LCAData = {
 
 interface LCAContextType {
   lcaData: LCAData;
+  lcaId: string | null;
   updateLCAData: (updates: Partial<LCAData>) => void;
   resetLCAData: () => void;
   calculateEmissions: () => number;
   calculateCircularity: () => number;
   lastScanResult: ScanResult | null;
-  setLastScanResult: (result: ScanResult | null) => void;
+  lastScanId: string | null;
+  setLastScanResult: (result: ScanResult | null, id?: string | null) => void;
   doctorAnalysis: DoctorAnalysis | null;
-  setDoctorAnalysis: (analysis: DoctorAnalysis | null) => void;
+  doctorAnalysisId: string | null;
+  setDoctorAnalysis: (analysis: DoctorAnalysis | null, id?: string | null) => void;
   applySimulation: (simulation: Partial<LCAData>) => void;
+  isBackendConnected: boolean;
+  isSaving: boolean;
+  createNewLCA: () => Promise<string | null>;
+  loadLCA: (id: string) => Promise<void>;
 }
 
 const LCAContext = createContext<LCAContextType | undefined>(undefined);
 
 export function LCAProvider({ children }: { children: React.ReactNode }) {
   const [lcaData, setLCAData] = useState<LCAData>(defaultLCAData);
-  const [lastScanResult, setLastScanResult] = useState<ScanResult | null>(null);
-  const [doctorAnalysis, setDoctorAnalysis] = useState<DoctorAnalysis | null>(null);
+  const [lcaId, setLcaId] = useState<string | null>(null);
+  const [lastScanResult, setLastScanResultState] = useState<ScanResult | null>(null);
+  const [lastScanId, setLastScanId] = useState<string | null>(null);
+  const [doctorAnalysis, setDoctorAnalysisState] = useState<DoctorAnalysis | null>(null);
+  const [doctorAnalysisId, setDoctorAnalysisId] = useState<string | null>(null);
+  const [isBackendConnected, setIsBackendConnected] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+
+  // Check backend connection on mount
+  useEffect(() => {
+    const checkBackend = async () => {
+      try {
+        const response = await fetch(`${import.meta.env.VITE_API_URL || 'http://localhost:8000'}/health`);
+        setIsBackendConnected(response.ok);
+      } catch {
+        setIsBackendConnected(false);
+      }
+    };
+    checkBackend();
+  }, []);
 
   const calculateEmissions = useCallback(() => {
     const { 
@@ -62,8 +88,7 @@ export function LCAProvider({ children }: { children: React.ReactNode }) {
       processHeat
     } = lcaData;
 
-    // Energy emissions based on grid mix
-    const coalFactor = 0.95; // kg CO2/kWh
+    const coalFactor = 0.95;
     const hydroFactor = 0.02;
     const solarFactor = 0.05;
     const gasFactor = 0.45;
@@ -75,15 +100,10 @@ export function LCAProvider({ children }: { children: React.ReactNode }) {
       (gridMix.naturalGas / 100) * gasFactor
     );
 
-    // Transport emissions
     const totalDistance = inboundDistance + outboundDistance;
     const transportEmissions = totalDistance * vehicleEfficiency;
-
-    // Process heat emissions (simplified)
     const processEmissions = processHeat * 0.05;
-
-    // Recycled content offset
-    const recycledOffset = (scrapInputRate / 100) * 0.6; // 60% reduction potential
+    const recycledOffset = (scrapInputRate / 100) * 0.6;
 
     const totalEmissions = (energyEmissions + transportEmissions + processEmissions) * (1 - recycledOffset);
     
@@ -93,7 +113,6 @@ export function LCAProvider({ children }: { children: React.ReactNode }) {
   const calculateCircularity = useCallback(() => {
     const { scrapInputRate, recyclingEfficiency, wasteRecovery, closedLoopRate } = lcaData;
     
-    // Weighted circularity score
     const score = (
       scrapInputRate * 0.3 +
       recyclingEfficiency * 0.3 +
@@ -104,17 +123,76 @@ export function LCAProvider({ children }: { children: React.ReactNode }) {
     return Math.round(score);
   }, [lcaData]);
 
+  // Save to backend when data changes (debounced)
+  useEffect(() => {
+    if (!lcaId || !isBackendConnected) return;
+
+    const timer = setTimeout(async () => {
+      setIsSaving(true);
+      try {
+        await lcaApi.update(lcaId, lcaData);
+      } catch (error) {
+        console.error('Failed to save LCA data:', error);
+      } finally {
+        setIsSaving(false);
+      }
+    }, 1000);
+
+    return () => clearTimeout(timer);
+  }, [lcaData, lcaId, isBackendConnected]);
+
+  const createNewLCA = useCallback(async (): Promise<string | null> => {
+    if (!isBackendConnected) return null;
+    
+    try {
+      const result = await lcaApi.create(lcaData);
+      const data = result.data as { _id: string } | null;
+      if (data && data._id) {
+        setLcaId(data._id);
+        return data._id;
+      }
+    } catch (error) {
+      console.error('Failed to create LCA:', error);
+    }
+    return null;
+  }, [lcaData, isBackendConnected]);
+
+  const loadLCA = useCallback(async (id: string) => {
+    if (!isBackendConnected) return;
+    
+    try {
+      const result = await lcaApi.get(id);
+      if (result.data) {
+        const { _id, createdAt, updatedAt, ...data } = result.data as any;
+        setLCAData(data);
+        setLcaId(_id);
+      }
+    } catch (error) {
+      console.error('Failed to load LCA:', error);
+    }
+  }, [isBackendConnected]);
+
   const updateLCAData = useCallback((updates: Partial<LCAData>) => {
-    setLCAData(prev => {
-      const newData = { ...prev, ...updates };
-      return newData;
-    });
+    setLCAData(prev => ({ ...prev, ...updates }));
   }, []);
 
   const resetLCAData = useCallback(() => {
     setLCAData(defaultLCAData);
-    setLastScanResult(null);
-    setDoctorAnalysis(null);
+    setLcaId(null);
+    setLastScanResultState(null);
+    setLastScanId(null);
+    setDoctorAnalysisState(null);
+    setDoctorAnalysisId(null);
+  }, []);
+
+  const setLastScanResult = useCallback((result: ScanResult | null, id: string | null = null) => {
+    setLastScanResultState(result);
+    setLastScanId(id);
+  }, []);
+
+  const setDoctorAnalysis = useCallback((analysis: DoctorAnalysis | null, id: string | null = null) => {
+    setDoctorAnalysisState(analysis);
+    setDoctorAnalysisId(id);
   }, []);
 
   const applySimulation = useCallback((simulation: Partial<LCAData>) => {
@@ -125,7 +203,6 @@ export function LCAProvider({ children }: { children: React.ReactNode }) {
     }));
   }, []);
 
-  // Auto-update derived values
   const contextValue = useMemo(() => {
     const emissions = calculateEmissions();
     const circularity = calculateCircularity();
@@ -140,17 +217,28 @@ export function LCAProvider({ children }: { children: React.ReactNode }) {
 
     return {
       lcaData: { ...lcaData, co2Emission: emissions, circularityScore: circularity },
+      lcaId,
       updateLCAData,
       resetLCAData,
       calculateEmissions,
       calculateCircularity,
       lastScanResult,
+      lastScanId,
       setLastScanResult,
       doctorAnalysis,
+      doctorAnalysisId,
       setDoctorAnalysis,
       applySimulation,
+      isBackendConnected,
+      isSaving,
+      createNewLCA,
+      loadLCA,
     };
-  }, [lcaData, updateLCAData, resetLCAData, calculateEmissions, calculateCircularity, lastScanResult, doctorAnalysis, applySimulation]);
+  }, [
+    lcaData, lcaId, updateLCAData, resetLCAData, calculateEmissions, calculateCircularity,
+    lastScanResult, lastScanId, setLastScanResult, doctorAnalysis, doctorAnalysisId, setDoctorAnalysis,
+    applySimulation, isBackendConnected, isSaving, createNewLCA, loadLCA
+  ]);
 
   return (
     <LCAContext.Provider value={contextValue}>
